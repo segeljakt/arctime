@@ -3,168 +3,143 @@
 
 use kompact::prelude::*;
 
+use crate::control::*;
 use crate::data::*;
+use crate::pipeline::*;
 use crate::port::*;
 
-#[derive(ComponentDefinition, Actor)]
-pub(crate) struct Task<S: StateReqs, I0: EventReqs, I1: EventReqs, O0: EventReqs, O1: EventReqs> {
+use std::sync::Arc;
+use std::time::Duration;
+
+#[derive(ComponentDefinition)]
+pub(crate) struct Task<S: StateReqs, I: EventReqs, O: EventReqs> {
     pub(crate) ctx: ComponentContext<Self>,
+    pub(crate) name: &'static str,
     /// Port for receiving input events (from proxies)
-    pub(crate) iport: ProvidedPort<OneWayPort<Either<I0, I1>>>,
-    pub(crate) proxy0: ActorRef<I0>,
-    pub(crate) proxy1: ActorRef<I1>,
+    pub(crate) iport: ProvidedPort<OneWayPort<I>>,
     /// Actors for broadcasting output events
-    pub(crate) orefs0: Vec<ActorRef<O0>>,
-    pub(crate) orefs1: Vec<ActorRef<O1>>,
+    pub(crate) oport: RequiredPort<OneWayPort<O>>,
+    pub(crate) buffer: Vec<O>,
     pub(crate) state: S,
-    pub(crate) logic: fn(&mut Self, Either<I0, I1>),
+    pub(crate) logic: fn(&mut Self, I),
+    pub(crate) timer: Option<TaskTimer<S, I, O>>,
+    pub(crate) scheduled: Option<ScheduledTimer>,
 }
 
-pub(crate) trait CreateTask<
-    S: StateReqs,
-    I0: EventReqs,
-    I1: EventReqs,
-    O0: EventReqs,
-    O1: EventReqs,
->
-{
-    fn create_task(
-        &self,
-        state: S,
-        logic: fn(&mut Task<S, I0, I1, O0, O1>, Either<I0, I1>),
-    ) -> std::sync::Arc<Component<Task<S, I0, I1, O0, O1>>>;
+#[derive(Clone)]
+pub(crate) struct TaskTimer<S: StateReqs, I: EventReqs, O: EventReqs> {
+    duration: Duration,
+    trigger: fn(&mut Task<S, I, O>),
 }
 
-impl<S: StateReqs, I0: EventReqs, I1: EventReqs, O0: EventReqs, O1: EventReqs>
-    CreateTask<S, I0, I1, O0, O1> for KompactSystem
-{
-    fn create_task(
-        &self,
-        state: S,
-        logic: fn(&mut Task<S, I0, I1, O0, O1>, Either<I0, I1>),
-    ) -> std::sync::Arc<Component<Task<S, I0, I1, O0, O1>>> {
-        let proxy0 = self.create(Proxy0::<I0, I1>::new);
-        let proxy1 = self.create(Proxy1::<I0, I1>::new);
-        let proxy0ref = proxy0.actor_ref();
-        let proxy1ref = proxy1.actor_ref();
-        let task = self.create(move || Task::new(proxy0ref, proxy1ref, state, logic));
-        biconnect_components(&task, &proxy0).expect("biconnect");
-        biconnect_components(&task, &proxy1).expect("biconnect");
-        self.start(&proxy0);
-        self.start(&proxy1);
-        task
+impl<S: StateReqs, I: EventReqs, O: EventReqs> Actor for Task<S, I, O> {
+    type Message = TaskMessage;
+
+    fn receive_local(&mut self, msg: Self::Message) -> Handled {
+        todo!()
+    }
+
+    fn receive_network(&mut self, msg: NetMessage) -> Handled {
+        todo!()
     }
 }
 
-impl<S: StateReqs, I0: EventReqs, I1: EventReqs, O0: EventReqs, O1: EventReqs>
-    Task<S, I0, I1, O0, O1>
-{
-    pub(crate) fn new(
-        proxy0: ActorRef<I0>,
-        proxy1: ActorRef<I1>,
+impl<S: StateReqs, I: EventReqs, O: EventReqs> Task<S, I, O> {
+    pub(crate) fn new(name: &'static str, state: S, logic: fn(&mut Self, I)) -> Self {
+        Self {
+            ctx: ComponentContext::uninitialised(),
+            name,
+            iport: ProvidedPort::uninitialised(),
+            oport: RequiredPort::uninitialised(),
+            buffer: Vec::new(),
+            state,
+            logic,
+            timer: None,
+            scheduled: None,
+        }
+    }
+
+    pub(crate) fn new_with_timer(
+        name: &'static str,
         state: S,
-        logic: fn(&mut Self, Either<I0, I1>),
+        logic: fn(&mut Self, I),
+        duration: Duration,
+        trigger: fn(&mut Self),
     ) -> Self {
         Self {
             ctx: ComponentContext::uninitialised(),
+            name,
             iport: ProvidedPort::uninitialised(),
-            proxy0,
-            proxy1,
-            orefs0: Vec::new(),
-            orefs1: Vec::new(),
+            oport: RequiredPort::uninitialised(),
+            buffer: Vec::new(),
             state,
             logic,
+            timer: Some(TaskTimer { duration, trigger }),
+            scheduled: None,
         }
     }
-    pub(crate) fn emit(&mut self, event: Either<O0, O1>) {
-        match event {
-            Either::A(event) => self.orefs0.iter().for_each(|r| r.tell(event.clone())),
-            Either::B(event) => self.orefs1.iter().for_each(|r| r.tell(event.clone())),
+
+    pub(crate) fn emit(&mut self, event: O) {
+        self.oport.trigger(event)
+    }
+
+    pub(crate) fn trigger(&mut self, timeout_id: ScheduledTimer) -> Handled {
+        match self.scheduled {
+            Some(ref timeout) if *timeout == timeout_id => {
+                let timer = self.timer.as_ref().unwrap();
+                let duration = timer.duration;
+                (timer.trigger)(self);
+                self.scheduled = Some(self.schedule_once(duration, Self::trigger));
+                Handled::Ok
+            }
+            Some(_) => Handled::Ok,
+            None => {
+                warn!(self.log(), "Got unexpected timeout: {:?}", timeout_id);
+                Handled::Ok
+            }
         }
     }
 }
 
-impl<S: StateReqs, I0: EventReqs, I1: EventReqs, O0: EventReqs, O1: EventReqs>
-    Provide<OneWayPort<Either<I0, I1>>> for Task<S, I0, I1, O0, O1>
-{
-    fn handle(&mut self, event: Either<I0, I1>) -> Handled {
+pub(crate) fn lazy_connect<S: StateReqs, I: EventReqs, O: EventReqs>(
+    task: &Arc<Component<Task<S, I, O>>>,
+) -> Arc<dyn Fn(ProvidedRef<OneWayPort<O>>)> {
+    let task = task.clone();
+    Arc::new(move |iport: ProvidedRef<OneWayPort<O>>| {
+        task.connect_to_provided(iport);
+    })
+}
+
+impl<S: StateReqs, I: EventReqs, O: EventReqs> Provide<OneWayPort<I>> for Task<S, I, O> {
+    fn handle(&mut self, event: I) -> Handled {
         (self.logic)(self, event);
         Handled::Ok
     }
 }
 
-#[derive(ComponentDefinition)]
-pub(crate) struct Proxy0<I0: EventReqs, I1: EventReqs> {
-    pub(crate) ctx: ComponentContext<Self>,
-    pub(crate) oport: RequiredPort<OneWayPort<Either<I0, I1>>>,
-}
-
-#[derive(ComponentDefinition)]
-pub(crate) struct Proxy1<I0: EventReqs, I1: EventReqs> {
-    pub(crate) ctx: ComponentContext<Self>,
-    pub(crate) oport: RequiredPort<OneWayPort<Either<I0, I1>>>,
-}
-
-impl<I0: EventReqs, I1: EventReqs> Proxy0<I0, I1> {
-    pub(crate) fn new() -> Self {
-        Self {
-            ctx: ComponentContext::uninitialised(),
-            oport: RequiredPort::uninitialised(),
-        }
-    }
-}
-
-impl<I0: EventReqs, I1: EventReqs> Proxy1<I0, I1> {
-    pub(crate) fn new() -> Self {
-        Self {
-            ctx: ComponentContext::uninitialised(),
-            oport: RequiredPort::uninitialised(),
-        }
-    }
-}
-
-impl<I0: EventReqs, I1: EventReqs> Actor for Proxy0<I0, I1> {
-    type Message = I0;
-
-    fn receive_local(&mut self, msg: Self::Message) -> Handled {
-        self.oport.trigger(Either::A(msg));
-        Handled::Ok
-    }
-
-    fn receive_network(&mut self, _: NetMessage) -> Handled {
-        todo!()
-    }
-}
-
-impl<I0: EventReqs, I1: EventReqs> Actor for Proxy1<I0, I1> {
-    type Message = I1;
-
-    fn receive_local(&mut self, msg: Self::Message) -> Handled {
-        self.oport.trigger(Either::B(msg));
-        Handled::Ok
-    }
-
-    fn receive_network(&mut self, _: NetMessage) -> Handled {
-        todo!()
-    }
-}
-
-impl<I0: EventReqs, I1: EventReqs> Require<OneWayPort<Either<I0, I1>>> for Proxy0<I0, I1> {
+impl<S: StateReqs, I: EventReqs, O: EventReqs> Require<OneWayPort<O>> for Task<S, I, O> {
     fn handle(&mut self, _: Never) -> Handled {
         Handled::Ok
     }
 }
 
-impl<I0: EventReqs, I1: EventReqs> Require<OneWayPort<Either<I0, I1>>> for Proxy1<I0, I1> {
-    fn handle(&mut self, _: Never) -> Handled {
+impl<S: StateReqs, I: EventReqs, O: EventReqs> ComponentLifecycle for Task<S, I, O> {
+    fn on_start(&mut self) -> Handled {
+        if let Some(timer) = &mut self.timer {
+            let duration = timer.duration;
+            self.scheduled = Some(self.schedule_once(duration, Self::trigger));
+        }
+        Handled::Ok
+    }
+
+    fn on_stop(&mut self) -> Handled {
+        if let Some(scheduled) = self.scheduled.take() {
+            self.cancel_timer(scheduled);
+        }
+        Handled::Ok
+    }
+
+    fn on_kill(&mut self) -> Handled {
         Handled::Ok
     }
 }
-
-impl<S: StateReqs, I0: EventReqs, I1: EventReqs, O0: EventReqs, O1: EventReqs> ComponentLifecycle
-    for Task<S, I0, I1, O0, O1>
-{
-}
-
-impl<I0: EventReqs, I1: EventReqs> ComponentLifecycle for Proxy0<I0, I1> {}
-impl<I0: EventReqs, I1: EventReqs> ComponentLifecycle for Proxy1<I0, I1> {}
