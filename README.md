@@ -27,7 +27,6 @@ fn main() {
         }));
 
 
-
     pipeline.execute();
 }
 ```
