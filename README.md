@@ -8,6 +8,7 @@ The Arctime is a non-distributed runtime for the [Arc](https://github.com/cda-gr
 - [x] **Ephemeral state**
 - [x] **Timers**
 - [x] **Sources** (Tasks which only produce data)
+- [x] **Sinks** (Tasks which only consume data)
 - [x] **Transformations** (Tasks which consume and produce data)
 - [x] **Multiplexing** (Connecting the same stream to multiple different tasks)
 - [x] **Multiporting** (Tasks can have multiple different input and output streams)
@@ -28,25 +29,25 @@ fn main() {
     pipeline
         .source(0..200, Duration::new(0, 5_000_000))
         .apply(|| {
-            Task::new("Map", (), |task: &mut Task<_, _, _>, event: i32| {
-                task.emit(event + 1)
+            Task::new("Map", (), |task, event| {
+                task.emit(event + 1);
             })
-        })
+         })
         .apply(|| {
-            Task::new("Filter", (), |task: &mut Task<_, _, _>, event: i32| {
+            Task::new("Filter", (), |task, event| {
                 if event % 2 == 0 {
                     task.emit(event);
                 }
             })
         })
         .apply(|| {
-            Task::new("Reduce", 0, |task: &mut Task<_, _, _>, event: i32| {
+            Task::new("Reduce", 0, |task, event| {
                 task.state += event;
                 task.emit(event);
             })
         })
-        .apply(|| {
-            Task::new("Print", (), |task: &mut Task<_, _, _>, event: i32| {
+        .sink(|| {
+            Task::new("Print", (), |task, event| {
                 info!(task.ctx.log(), "{}", event)
             })
         });
