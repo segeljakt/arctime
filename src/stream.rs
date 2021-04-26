@@ -14,9 +14,9 @@ use crate::task::*;
 
 #[derive(Clone)]
 pub(crate) struct Stream<T: EventReqs> {
-    client: Arc<Component<Client>>,
-    connect: Arc<dyn Fn(Arc<dyn AbstractComponent<Message = TaskMessage>>)>,
-    tasks: Arc<RefCell<Vec<Arc<dyn AbstractComponent<Message = TaskMessage>>>>>,
+    pub(crate) client: Arc<Component<Client>>,
+    pub(crate) connect: Arc<dyn Fn(Arc<dyn AbstractComponent<Message = TaskMessage>>)>,
+    pub(crate) tasks: Arc<RefCell<Vec<Arc<dyn AbstractComponent<Message = TaskMessage>>>>>,
     marker: PhantomData<T>,
 }
 
@@ -41,17 +41,6 @@ impl<I: EventReqs> Stream<I> {
         let connect = lazy_connect(&task);
         self.tasks.borrow_mut().push(task);
         Stream::new(self.client, connect, self.tasks)
-    }
-
-    /// Write a stream to a sink.
-    /// Also returns a new pipeline (which can for example be finalized)
-    pub(crate) fn sink<S: StateReqs>(self, task: Task<S, I, Never>) -> Pipeline<impl SystemHandle> {
-        let stream = self.apply(task);
-        Pipeline {
-            system: stream.client.on_definition(|c| c.ctx().system()),
-            client: stream.client,
-            tasks: stream.tasks,
-        }
     }
 
     /// Merge two streams into one.

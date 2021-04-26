@@ -9,6 +9,7 @@ mod port;
 mod source;
 mod stream;
 mod task;
+mod sink;
 
 use client::*;
 use data::*;
