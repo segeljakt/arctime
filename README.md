@@ -12,19 +12,20 @@ fn main() {
     
     pipeline
         .source(0..200, Duration::new(0, 5_000_000))
-        .apply("Map", (), |task, event| task.emit(event + 1))
-        .apply("Filter", (), |task, event| {
+        .apply(Task::new("Map", (), |task, event| task.emit(event + 1)))
+        .apply(Task::new("Filter", (), |task, event| {
             if event % 2 == 0 {
                 task.emit(event);
             }
-        })
-        .apply("Reduce", 0, |task, event| {
+        }))
+        .apply(Task::new("Reduce", 0, |task, event| {
             task.state += event;
             task.emit(event);
-        })
-        .sink("Print", (), |task, event| {
-            info!(task.ctx.log(), "{}", event)
-        });
+        }))
+        .sink(Task::new("Print", (), |task, event| {
+            info!(task.ctx.log(), "{}", event);
+        }));
+
 
 
     pipeline.execute();
