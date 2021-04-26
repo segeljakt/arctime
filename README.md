@@ -2,7 +2,7 @@
 
 The Arctime is a non-distributed runtime for the [Arc](https://github.com/cda-group/arc) language, built in [kompact](https://github.com/cda-group/kompact). The purpose of the Arctime is to test out new experimental features which could potentially be added to the [Arcon](https://github.com/cda-group/arcon/) distributed runtime.
 
-## Implemented functionality so far
+## Supported functionality so far
 
 - [x] **Tasks** (functions over streams)
 - [x] **Ephemeral state**
