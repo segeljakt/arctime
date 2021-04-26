@@ -37,12 +37,14 @@ fn main() {
 - [x] **Ephemeral state**
 - [x] **Timers**
 - [x] **Sources** (Tasks which only produce data)
-- [x] **Sinks** (Tasks which only consume data)
 - [x] **Transformations** (Tasks which consume and produce data)
 - [x] **Multiplexing** (Connecting the same stream to multiple different tasks)
 - [x] **Multiporting** (Tasks can have multiple different input and output streams)
 - [x] **Duplexing** (Consumers can send control-events to their producers)
 - [x] **Bounded buffers** (Producers buffer their output data)
+- [x] **Finite streams** (Tasks terminate when their inputs are depleted)
+- [x] **Nested pipelines** (It is possible to spawn a pipeline inside another)
+- [ ] **Short running tasks** (Tasks can return values when they terminate)
 - [ ] **Flow control** (Consumers pull data from their producers)
 - [ ] **Event time**
 - [ ] **Data parallelism**

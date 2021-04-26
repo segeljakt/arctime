@@ -3,6 +3,7 @@
 mod client;
 mod control;
 mod data;
+mod executor;
 mod pipeline;
 mod port;
 mod source;
@@ -11,6 +12,7 @@ mod task;
 
 use client::*;
 use data::*;
+use executor::*;
 use pipeline::*;
 use task::*;
 
@@ -23,51 +25,38 @@ type Reduce<I, O> = Task<O, I, O>;
 type Print<T> = Task<(), T, Never>;
 
 fn main() {
-    let pipeline = Pipeline::new();
+    let executor = Executor::new();
 
-    pipeline
-        .source(0..100, Duration::new(0, 50_000_000))
-        // task Map(): i32 -> i32 {
-        //     on event => emit event - 1
-        // }
-        .apply(|| {
-            Task::new("Map", (), |task: &mut Map<i32, i32>, event: i32| {
-                task.emit(event + 1)
-            })
-        })
-        // task Filter(): i32 -> i32 {
-        //     on event => if event > 0 {
-        //         emit event
-        //     }
-        // }
-        .apply(|| {
-            Task::new("Filter", (), |task: &mut Filter<i32>, event: i32| {
-                if event % 2 == 0 {
-                    task.emit(event);
-                }
-            })
-        })
-        // task Reduce(state: i32): i32 -> i32 {
-        //     var state = state;
-        //     on event => {
-        //         state += event;
-        //         emit event
-        //     }
-        // }
-        .apply(|| {
-            Task::new("Reduce", 0, |task: &mut Reduce<i32, i32>, event: i32| {
-                task.state += event;
+    executor
+        .pipeline()
+        .source(0..200, Duration::new(0, 50_000_000))
+        .apply(Task::new("Map", (), |task, event| task.emit(event + 1)))
+        .apply(Task::new("Filter", (), |task, event| {
+            if event % 2 == 0 {
                 task.emit(event);
-            })
-        })
-        // task Print(): i32 -> () {
-        //     on event => print(event)
-        // }
-        .apply(|| {
-            Task::new("Print", (), |task: &mut Print<i32>, event: i32| {
-                info!(task.ctx.log(), "{}", event)
-            })
-        });
+            }
+        }))
+        .apply(Task::new("Reduce", 0, |task, event| {
+            task.state += event;
+            task.emit(event);
+        }))
+        .apply(Task::new(
+            "Nested",
+            (),
+            |task: &mut Task<(), i32, i32>, event: i32| {
+                task.pipeline()
+                    .source(event..100, Duration::new(0, 100_000_000))
+                    .sink(Task::new("Inner print", (), |task, event| {
+                        info!(task.ctx.log(), "Inner: {}", event);
+                    }))
+                    .finalize();
+                task.emit(event)
+            },
+        ))
+        .sink(Task::new("Print", (), |task, event| {
+            info!(task.ctx.log(), "Outer: {}", event);
+        }))
+        .finalize();
 
-    pipeline.execute();
+    executor.execute();
 }

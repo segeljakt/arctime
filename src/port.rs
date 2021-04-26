@@ -7,6 +7,11 @@ use crate::data::*;
 pub(crate) struct OneWayPort<T: EventReqs>(PhantomData<T>);
 
 impl<T: EventReqs> Port for OneWayPort<T> {
-    type Indication = Never;
-    type Request = T;
+    type Indication = FlowControl;
+    type Request = Option<T>;
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum FlowControl {
+    Pull,
 }
