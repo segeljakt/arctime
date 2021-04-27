@@ -1,13 +1,11 @@
 use std::fmt::Debug;
+pub use time::PrimitiveDateTime as DateTime;
 
-pub(crate) trait EventReqs: 'static + Sync + Send + Debug + Clone {}
-impl<T> EventReqs for T where T: 'static + Sync + Send + Debug + Clone {}
-
-pub(crate) trait StateReqs: 'static + Sync + Send + Debug + Clone {}
-impl<T> StateReqs for T where T: 'static + Sync + Send + Debug + Clone {}
+pub trait DataReqs: 'static + Sync + Send + Debug + Clone {}
+impl<T> DataReqs for T where T: 'static + Sync + Send + Debug + Clone {}
 
 #[derive(Debug, Clone)]
-pub(crate) enum Union<L, R> {
+pub(crate) enum Either<L, R> {
     L(L),
     R(R),
 }

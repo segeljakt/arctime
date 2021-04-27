@@ -1,16 +1,21 @@
 #![allow(clippy::type_complexity)]
+#![allow(deprecated)]
 #![allow(dead_code)]
 
+use arrayvec::ArrayVec;
 use kompact::component::AbstractComponent;
 use kompact::prelude::*;
-use std::collections::VecDeque;
+use time::*;
 
 use crate::control::*;
 use crate::data::*;
 use crate::pipeline::*;
 use crate::port::*;
 use crate::stream::*;
+use crate::timer::*;
 
+use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,30 +25,38 @@ pub enum Role {
     Consumer,
 }
 
+/// A general-purpose task component.
 #[derive(ComponentDefinition)]
-pub(crate) struct Task<S: StateReqs, I: EventReqs, O: EventReqs, R: EventReqs = Never> {
-    pub(crate) ctx: ComponentContext<Self>,
-    pub(crate) name: &'static str,
-    pub(crate) iport: ProvidedPort<OneWayPort<I>>,
-    pub(crate) oport: RequiredPort<OneWayPort<O>>,
-    pub(crate) state: S,
-    pub(crate) logic: fn(&mut Self, I),
-    pub(crate) oneshot: Option<OneShot<S, I, O, R>>,
-    pub(crate) scheduled_oneshot: Option<ScheduledTimer>,
-    pub(crate) role: Role,
+pub struct Task<S: DataReqs, I: DataReqs, O: DataReqs, R: DataReqs = Never> {
+    pub ctx: ComponentContext<Self>,
+    pub name: &'static str,
+    pub promise: Option<Ask<(), R>>,
+    pub data_iport: ProvidedPort<DataPort<I>>,
+    pub data_oport: RequiredPort<DataPort<O>>,
+    pub ctrl_iport: ProvidedPort<CtrlPort>,
+    pub ctrl_oport: RequiredPort<CtrlPort>,
+    pub lowest_observed_watermarks: Vec<DateTime>,
+    pub time: DateTime,
+    pub state: S,
+    pub logic: fn(&mut Self, I),
+    pub ptimer: Option<ProcessingTimer<S, I, O, R>>,
+    pub etimer: EventTimer<S, I, O, R>,
+    pub role: Role,
 }
 
 #[derive(Clone)]
-pub(crate) struct OneShot<S: StateReqs, I: EventReqs, O: EventReqs, R: EventReqs> {
+pub struct ProcessingTimer<S: DataReqs, I: DataReqs, O: DataReqs, R: DataReqs> {
     duration: Duration,
+    scheduled: Option<ScheduledTimer>,
     trigger: fn(&mut Task<S, I, O, R>),
 }
 
-impl<R: EventReqs, S: StateReqs, I: EventReqs, O: EventReqs> Actor for Task<S, I, O, R> {
+impl<R: DataReqs, S: DataReqs, I: DataReqs, O: DataReqs> Actor for Task<S, I, O, R> {
     type Message = Ask<(), R>;
 
     fn receive_local(&mut self, msg: Self::Message) -> Handled {
-        todo!()
+        self.promise = Some(msg);
+        Handled::Ok
     }
 
     fn receive_network(&mut self, msg: NetMessage) -> Handled {
@@ -51,18 +64,23 @@ impl<R: EventReqs, S: StateReqs, I: EventReqs, O: EventReqs> Actor for Task<S, I
     }
 }
 
-impl<S: StateReqs, I: EventReqs, O: EventReqs, R: EventReqs> Task<S, I, O, R> {
+impl<S: DataReqs, I: DataReqs, O: DataReqs, R: DataReqs> Task<S, I, O, R> {
     pub(crate) fn new(name: &'static str, state: S, logic: fn(&mut Self, I)) -> Self {
         Self {
             ctx: ComponentContext::uninitialised(),
             name,
-            iport: ProvidedPort::uninitialised(),
-            oport: RequiredPort::uninitialised(),
+            promise: None,
+            data_iport: ProvidedPort::uninitialised(),
+            data_oport: RequiredPort::uninitialised(),
+            ctrl_iport: ProvidedPort::uninitialised(),
+            ctrl_oport: RequiredPort::uninitialised(),
             state,
             logic,
-            oneshot: None,
-            scheduled_oneshot: None,
+            ptimer: None,
             role: Role::ProducerConsumer,
+            lowest_observed_watermarks: vec![],
+            time: DateTime::unix_epoch(),
+            etimer: EventTimer::default(),
         }
     }
 
@@ -70,35 +88,47 @@ impl<S: StateReqs, I: EventReqs, O: EventReqs, R: EventReqs> Task<S, I, O, R> {
         Self { role, ..self }
     }
 
-    pub(crate) fn new_with_timer(
+    pub(crate) fn new_periodic(
         name: &'static str,
         state: S,
-        logic: fn(&mut Self, I),
         duration: Duration,
         trigger: fn(&mut Self),
     ) -> Self {
         Self {
-            oneshot: Some(OneShot { duration, trigger }),
-            ..Self::new(name, state, logic)
+            ptimer: Some(ProcessingTimer {
+                duration,
+                trigger,
+                scheduled: None,
+            }),
+            ..Self::new(name, state, |_, _| {})
         }
     }
 
-    pub(crate) fn emit(&mut self, event: O) {
-        self.oport.trigger(Some(event));
+    pub(crate) fn min_watermark(&self) -> DateTime {
+        *self.lowest_observed_watermarks.iter().min().unwrap()
     }
 
-    pub(crate) fn terminate(&mut self) {
-        self.oport.trigger(None);
+    pub(crate) fn emit(&mut self, data: O) {
+        self.data_oport.trigger(DataEvent::Item(self.time, data));
+    }
+
+    /// Die with a return value
+    pub(crate) fn exit(&mut self, rval: R) {
+        if let Some(promise) = self.promise.take() {
+            promise.reply(rval);
+        };
+        self.data_oport.trigger(DataEvent::End);
         self.ctx.suicide();
     }
 
     pub(crate) fn oneshot_trigger(&mut self, timeout: ScheduledTimer) -> Handled {
-        match self.scheduled_oneshot {
-            Some(ref scheduled_oneshot) if *scheduled_oneshot == timeout => {
-                let oneshot = self.oneshot.as_ref().unwrap();
+        match self.ptimer.as_mut().unwrap().scheduled.as_ref() {
+            Some(scheduled_oneshot) if *scheduled_oneshot == timeout => {
+                let oneshot = self.ptimer.as_ref().unwrap();
                 let duration = oneshot.duration;
                 (oneshot.trigger)(self);
-                self.scheduled_oneshot = Some(self.schedule_once(duration, Self::oneshot_trigger));
+                self.ptimer.as_mut().unwrap().scheduled =
+                    Some(self.schedule_once(duration, Self::oneshot_trigger));
                 Handled::Ok
             }
             Some(_) => Handled::Ok,
@@ -110,52 +140,101 @@ impl<S: StateReqs, I: EventReqs, O: EventReqs, R: EventReqs> Task<S, I, O, R> {
     }
 }
 
-pub(crate) fn lazy_connect<S: StateReqs, I: EventReqs, O: EventReqs, R: EventReqs>(
+impl<S: DataReqs, I: DataReqs, O: DataReqs, R: DataReqs> FnOnce<(Stream<I>,)> for Task<S, I, O, R> {
+    type Output = Stream<O>;
+
+    extern "rust-call" fn call_once(self, (stream,): (Stream<I>,)) -> Self::Output {
+        // Step 1. Initialise the task
+        let task = stream.client.system().create(|| self);
+        // Step 2. Connect the input streams to each of the task's input ports
+        task.on_definition(|consumer| {
+            (stream.connector)(&mut consumer.data_iport);
+        });
+        // Step 3. Create a stream for each of the task's output ports
+        let producer = task.clone();
+        let connector: Arc<ConnectFn<_>> = Arc::new(move |iport| {
+            producer.on_definition(|producer| {
+                iport.connect(producer.data_oport.share());
+                producer.data_oport.connect(iport.share());
+            });
+        });
+        // Step 4. Create a closure for starting up the task
+        let start_fns = stream.start_fns.clone();
+        let client = stream.client.clone();
+        stream
+            .start_fns
+            .borrow_mut()
+            .push(Box::new(move || client.system().start(&task)));
+        let client = stream.client.clone();
+        (Stream::new(client, connector, start_fns))
+    }
+}
+
+pub(crate) fn create_connector<S: DataReqs, I: DataReqs, O: DataReqs, R: DataReqs>(
     producer: Arc<Component<Task<S, I, O, R>>>,
-) -> Arc<dyn Fn(&mut ProvidedPort<OneWayPort<O>>) + 'static> {
+) -> Arc<dyn Fn(&mut ProvidedPort<DataPort<O>>) + 'static> {
     Arc::new(move |mut iport| {
         producer.on_definition(|producer| {
-            iport.connect(producer.oport.share());
-            producer.oport.connect(iport.share());
+            iport.connect(producer.data_oport.share());
+            producer.data_oport.connect(iport.share());
         })
     })
 }
 
-impl<S: StateReqs, I: EventReqs, O: EventReqs, R: EventReqs> Provide<OneWayPort<I>>
-    for Task<S, I, O, R>
-{
-    fn handle(&mut self, event: Option<I>) -> Handled {
-        if let Some(event) = event {
-            (self.logic)(self, event);
-            Handled::Ok
-        } else {
-            self.oport.trigger(None);
-            Handled::DieNow
+impl<S: DataReqs, I: DataReqs, O: DataReqs, R: DataReqs> Provide<DataPort<I>> for Task<S, I, O, R> {
+    fn handle(&mut self, event: DataEvent<I>) -> Handled {
+        match event {
+            DataEvent::Watermark(time) => {
+                if time > self.time {
+                    let diff = time - self.time;
+                    self.advance(diff.to_std().unwrap());
+                }
+                Handled::Ok
+            }
+            DataEvent::Item(time, data) => {
+                if time >= self.time {
+                    (self.logic)(self, data);
+                }
+                Handled::Ok
+            }
+            DataEvent::End => {
+                self.data_oport.trigger(DataEvent::End);
+                Handled::DieNow
+            }
         }
     }
 }
 
-impl<S: StateReqs, I: EventReqs, O: EventReqs, R: EventReqs> Require<OneWayPort<O>>
-    for Task<S, I, O, R>
-{
-    fn handle(&mut self, event: FlowControl) -> Handled {
+impl<S: DataReqs, I: DataReqs, O: DataReqs, R: DataReqs> Require<DataPort<O>> for Task<S, I, O, R> {
+    fn handle(&mut self, event: DataReply) -> Handled {
         Handled::Ok
     }
 }
 
-impl<S: StateReqs, I: EventReqs, O: EventReqs, R: EventReqs> ComponentLifecycle
-    for Task<S, I, O, R>
-{
+impl<S: DataReqs, I: DataReqs, O: DataReqs, R: DataReqs> Provide<CtrlPort> for Task<S, I, O, R> {
+    fn handle(&mut self, event: CtrlEvent) -> Handled {
+        todo!()
+    }
+}
+
+impl<S: DataReqs, I: DataReqs, O: DataReqs, R: DataReqs> Require<CtrlPort> for Task<S, I, O, R> {
+    fn handle(&mut self, _: CtrlReply) -> Handled {
+        Handled::Ok
+    }
+}
+
+impl<S: DataReqs, I: DataReqs, O: DataReqs, R: DataReqs> ComponentLifecycle for Task<S, I, O, R> {
     fn on_start(&mut self) -> Handled {
-        if let Some(oneshot) = self.oneshot.as_mut() {
+        if let Some(oneshot) = self.ptimer.as_mut() {
             let duration = oneshot.duration;
-            self.scheduled_oneshot = Some(self.schedule_once(duration, Self::oneshot_trigger));
+            self.ptimer.as_mut().unwrap().scheduled =
+                Some(self.schedule_once(duration, Self::oneshot_trigger));
         }
         Handled::Ok
     }
 
     fn on_stop(&mut self) -> Handled {
-        if let Some(scheduled_oneshot) = self.scheduled_oneshot.take() {
+        if let Some(scheduled_oneshot) = self.ptimer.as_mut().unwrap().scheduled.take() {
             self.cancel_timer(scheduled_oneshot);
         }
         Handled::Ok

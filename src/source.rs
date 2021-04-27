@@ -1,8 +1,11 @@
+// Window operator can forward
+// Watermark emitted after trigger
 use crate::control::*;
 use kompact::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use time::PrimitiveDateTime as DateTime;
 
 use crate::client::*;
 use crate::data::*;
@@ -11,32 +14,37 @@ use crate::port::*;
 use crate::stream::*;
 use crate::task::*;
 
-type Source<T, O> = Task<T, Never, O, Never>;
-
-fn noop<T: Iterator<Item = O> + StateReqs, O: EventReqs>(task: &mut Source<T, O>, event: Never) {}
-
 impl<S: SystemHandle> Pipeline<S> {
-    pub(crate) fn source<T, O: EventReqs>(&self, iter: T, duration: Duration) -> Stream<O>
+    pub(crate) fn source<T, O: DataReqs>(&self, iter: T, duration: Duration) -> Stream<O>
     where
-        T: IntoIterator<Item = O>,
-        <T as IntoIterator>::IntoIter: StateReqs,
+        T: IntoIterator<Item = (DateTime, O)>,
+        <T as IntoIterator>::IntoIter: DataReqs,
     {
         let iter = iter.into_iter();
-        let task = self.system.create(move || {
-            Task::new_with_timer("Source", iter, noop, duration, |task| {
-                if let Some(item) = task.state.next() {
-                    task.emit(item);
+        let task = Task::new_periodic(
+            "Source",
+            iter,
+            duration,
+            |task: &mut Task<<T as IntoIterator>::IntoIter, Never, O, ()>| {
+                if let Some((time, data)) = task.state.next() {
+                    if time > task.lowest_observed_watermarks[0] {
+                        task.lowest_observed_watermarks[0] = time;
+                        task.data_oport.trigger(DataEvent::Item(time, data));
+                    } else {
+                        info!(task.ctx.log(), "Discarded late event with time {}", time);
+                    }
                 } else {
-                    task.terminate();
+                    task.exit(());
                 }
-            })
-            .set_role(Role::Producer)
-        });
-        let connect = lazy_connect(task.clone());
+            },
+        )
+        .set_role(Role::Producer);
+        let task = self.system.create(move || task);
+        let connect = create_connector(task.clone());
         let client = self.client.clone();
-        self.starters
+        self.startup
             .borrow_mut()
             .push(Box::new(move || client.system().start(&task)));
-        Stream::new(self.client.clone(), connect, self.starters.clone())
+        Stream::new(self.client.clone(), connect, self.startup.clone())
     }
 }

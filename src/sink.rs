@@ -13,10 +13,10 @@ use crate::port::*;
 use crate::stream::*;
 use crate::task::*;
 
-impl<I: EventReqs> Stream<I> {
+impl<I: DataReqs> Stream<I> {
     /// Write a stream to a sink.
     /// Also returns a new pipeline (which can for example be finalized)
-    pub(crate) fn sink<S: StateReqs>(
+    pub(crate) fn sink<S: DataReqs>(
         self,
         task: Task<S, I, Never, Never>,
     ) -> Pipeline<impl SystemHandle> {
@@ -24,7 +24,7 @@ impl<I: EventReqs> Stream<I> {
         Pipeline {
             system: stream.client.on_definition(|c| c.ctx().system()),
             client: stream.client,
-            starters: stream.starters,
+            startup: stream.start_fns,
         }
     }
 }
