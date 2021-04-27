@@ -1,3 +1,4 @@
+#![allow(clippy::type_complexity)]
 use crate::control::*;
 use kompact::component::AbstractComponent;
 use kompact::config::ConfigEntry;
@@ -15,13 +16,13 @@ use crate::task::*;
 pub(crate) struct Pipeline<S: SystemHandle> {
     pub(crate) system: S,
     pub(crate) client: Arc<Component<Client>>,
-    pub(crate) tasks: Arc<RefCell<Vec<Arc<dyn AbstractComponent<Message = TaskMessage>>>>>,
+    pub(crate) starters: Arc<RefCell<Vec<Box<dyn FnOnce() + 'static>>>>,
 }
 
 impl<S: SystemHandle> Pipeline<S> {
     pub(crate) fn finalize(self) {
-        for task in self.tasks.borrow_mut().drain(..).rev() {
-            self.system.start(&task);
+        for starter in self.starters.borrow_mut().drain(..).rev() {
+            starter();
         }
     }
 }
@@ -34,12 +35,12 @@ impl Executor {
         Pipeline {
             system,
             client,
-            tasks,
+            starters: tasks,
         }
     }
 }
 
-impl<S: StateReqs, I: EventReqs, O: EventReqs> Task<S, I, O> {
+impl<S: StateReqs, I: EventReqs, O: EventReqs, R: EventReqs> Task<S, I, O, R> {
     pub(crate) fn pipeline(&self) -> Pipeline<impl SystemHandle> {
         let system = self.ctx.system();
         let client = system.create(Client::new);
@@ -47,7 +48,7 @@ impl<S: StateReqs, I: EventReqs, O: EventReqs> Task<S, I, O> {
         Pipeline {
             system,
             client,
-            tasks,
+            starters: tasks,
         }
     }
 }

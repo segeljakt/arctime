@@ -37,6 +37,7 @@ fn main() {
 - [x] **Ephemeral state**
 - [x] **Timers**
 - [x] **Sources** (Tasks which only produce data)
+- [x] **Sinks** (Tasks which only consume data)
 - [x] **Transformations** (Tasks which consume and produce data)
 - [x] **Multiplexing** (Connecting the same stream to multiple different tasks)
 - [x] **Multiporting** (Tasks can have multiple different input and output streams)

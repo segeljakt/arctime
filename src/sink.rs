@@ -16,12 +16,15 @@ use crate::task::*;
 impl<I: EventReqs> Stream<I> {
     /// Write a stream to a sink.
     /// Also returns a new pipeline (which can for example be finalized)
-    pub(crate) fn sink<S: StateReqs>(self, task: Task<S, I, Never>) -> Pipeline<impl SystemHandle> {
+    pub(crate) fn sink<S: StateReqs>(
+        self,
+        task: Task<S, I, Never, Never>,
+    ) -> Pipeline<impl SystemHandle> {
         let stream = self.apply(task);
         Pipeline {
             system: stream.client.on_definition(|c| c.ctx().system()),
             client: stream.client,
-            tasks: stream.tasks,
+            starters: stream.starters,
         }
     }
 }
