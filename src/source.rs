@@ -11,7 +11,7 @@ use crate::port::*;
 use crate::stream::*;
 use crate::task::*;
 
-type Source<T, O> = Task<T, Never, O>;
+type Source<T, O> = Task<T, Never, O, Never>;
 
 fn noop<T: Iterator<Item = O> + StateReqs, O: EventReqs>(task: &mut Source<T, O>, event: Never) {}
 
@@ -25,13 +25,18 @@ impl<S: SystemHandle> Pipeline<S> {
         let task = self.system.create(move || {
             Task::new_with_timer("Source", iter, noop, duration, |task| {
                 if let Some(item) = task.state.next() {
-                    task.emit(item)
+                    task.emit(item);
+                } else {
+                    task.terminate();
                 }
             })
             .set_role(Role::Producer)
         });
-        let connect = lazy_connect(&task);
-        self.tasks.borrow_mut().push(task);
-        Stream::new(self.client.clone(), connect, self.tasks.clone())
+        let connect = lazy_connect(task.clone());
+        let client = self.client.clone();
+        self.starters
+            .borrow_mut()
+            .push(Box::new(move || client.system().start(&task)));
+        Stream::new(self.client.clone(), connect, self.starters.clone())
     }
 }

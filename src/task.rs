@@ -9,12 +9,10 @@ use crate::control::*;
 use crate::data::*;
 use crate::pipeline::*;
 use crate::port::*;
+use crate::stream::*;
 
 use std::sync::Arc;
 use std::time::Duration;
-
-pub const FRAME_SIZE: usize = 8;
-pub const N_FRAMES: usize = 4;
 
 pub enum Role {
     Producer,
@@ -23,31 +21,26 @@ pub enum Role {
 }
 
 #[derive(ComponentDefinition)]
-pub(crate) struct Task<S: StateReqs, I: EventReqs, O: EventReqs> {
+pub(crate) struct Task<S: StateReqs, I: EventReqs, O: EventReqs, R: EventReqs = Never> {
     pub(crate) ctx: ComponentContext<Self>,
     pub(crate) name: &'static str,
-    /// Port for receiving input events (from proxies)
     pub(crate) iport: ProvidedPort<OneWayPort<I>>,
-    /// Actors for broadcasting output events
     pub(crate) oport: RequiredPort<OneWayPort<O>>,
     pub(crate) state: S,
     pub(crate) logic: fn(&mut Self, I),
-    pub(crate) oneshot: Option<OneShot<S, I, O>>,
+    pub(crate) oneshot: Option<OneShot<S, I, O, R>>,
     pub(crate) scheduled_oneshot: Option<ScheduledTimer>,
-    pub(crate) scheduled_periodic: Option<ScheduledTimer>,
     pub(crate) role: Role,
 }
 
-use crate::stream::Stream;
-
 #[derive(Clone)]
-pub(crate) struct OneShot<S: StateReqs, I: EventReqs, O: EventReqs> {
+pub(crate) struct OneShot<S: StateReqs, I: EventReqs, O: EventReqs, R: EventReqs> {
     duration: Duration,
-    trigger: fn(&mut Task<S, I, O>),
+    trigger: fn(&mut Task<S, I, O, R>),
 }
 
-impl<S: StateReqs, I: EventReqs, O: EventReqs> Actor for Task<S, I, O> {
-    type Message = TaskMessage;
+impl<R: EventReqs, S: StateReqs, I: EventReqs, O: EventReqs> Actor for Task<S, I, O, R> {
+    type Message = Ask<(), R>;
 
     fn receive_local(&mut self, msg: Self::Message) -> Handled {
         todo!()
@@ -58,7 +51,7 @@ impl<S: StateReqs, I: EventReqs, O: EventReqs> Actor for Task<S, I, O> {
     }
 }
 
-impl<S: StateReqs, I: EventReqs, O: EventReqs> Task<S, I, O> {
+impl<S: StateReqs, I: EventReqs, O: EventReqs, R: EventReqs> Task<S, I, O, R> {
     pub(crate) fn new(name: &'static str, state: S, logic: fn(&mut Self, I)) -> Self {
         Self {
             ctx: ComponentContext::uninitialised(),
@@ -69,7 +62,6 @@ impl<S: StateReqs, I: EventReqs, O: EventReqs> Task<S, I, O> {
             logic,
             oneshot: None,
             scheduled_oneshot: None,
-            scheduled_periodic: None,
             role: Role::ProducerConsumer,
         }
     }
@@ -95,6 +87,11 @@ impl<S: StateReqs, I: EventReqs, O: EventReqs> Task<S, I, O> {
         self.oport.trigger(Some(event));
     }
 
+    pub(crate) fn terminate(&mut self) {
+        self.oport.trigger(None);
+        self.ctx.suicide();
+    }
+
     pub(crate) fn oneshot_trigger(&mut self, timeout: ScheduledTimer) -> Handled {
         match self.scheduled_oneshot {
             Some(ref scheduled_oneshot) if *scheduled_oneshot == timeout => {
@@ -113,22 +110,20 @@ impl<S: StateReqs, I: EventReqs, O: EventReqs> Task<S, I, O> {
     }
 }
 
-pub(crate) fn lazy_connect<S: StateReqs, I: EventReqs, O: EventReqs>(
-    producer: &Arc<Component<Task<S, I, O>>>,
-) -> Arc<dyn Fn(Arc<dyn AbstractComponent<Message = TaskMessage>>)> {
-    let producer = producer.clone() as Arc<dyn AbstractComponent<Message = TaskMessage>>;
-    Arc::new(move |consumer| {
-        producer.on_dyn_definition(|producer| {
-            consumer.on_dyn_definition(|consumer| {
-                let oport = producer.get_required_port::<OneWayPort<O>>().unwrap();
-                let iport = consumer.get_provided_port::<OneWayPort<O>>().unwrap();
-                biconnect_ports(iport, oport);
-            })
+pub(crate) fn lazy_connect<S: StateReqs, I: EventReqs, O: EventReqs, R: EventReqs>(
+    producer: Arc<Component<Task<S, I, O, R>>>,
+) -> Arc<dyn Fn(&mut ProvidedPort<OneWayPort<O>>) + 'static> {
+    Arc::new(move |mut iport| {
+        producer.on_definition(|producer| {
+            iport.connect(producer.oport.share());
+            producer.oport.connect(iport.share());
         })
     })
 }
 
-impl<S: StateReqs, I: EventReqs, O: EventReqs> Provide<OneWayPort<I>> for Task<S, I, O> {
+impl<S: StateReqs, I: EventReqs, O: EventReqs, R: EventReqs> Provide<OneWayPort<I>>
+    for Task<S, I, O, R>
+{
     fn handle(&mut self, event: Option<I>) -> Handled {
         if let Some(event) = event {
             (self.logic)(self, event);
@@ -137,20 +132,20 @@ impl<S: StateReqs, I: EventReqs, O: EventReqs> Provide<OneWayPort<I>> for Task<S
             self.oport.trigger(None);
             Handled::DieNow
         }
-        // coz::begin!("event-begin");
-        //         Handled::block_on(self, move |mut async_self| async move {
-        //         })
-        // coz::end!("event-end");
     }
 }
 
-impl<S: StateReqs, I: EventReqs, O: EventReqs> Require<OneWayPort<O>> for Task<S, I, O> {
+impl<S: StateReqs, I: EventReqs, O: EventReqs, R: EventReqs> Require<OneWayPort<O>>
+    for Task<S, I, O, R>
+{
     fn handle(&mut self, event: FlowControl) -> Handled {
         Handled::Ok
     }
 }
 
-impl<S: StateReqs, I: EventReqs, O: EventReqs> ComponentLifecycle for Task<S, I, O> {
+impl<S: StateReqs, I: EventReqs, O: EventReqs, R: EventReqs> ComponentLifecycle
+    for Task<S, I, O, R>
+{
     fn on_start(&mut self) -> Handled {
         if let Some(oneshot) = self.oneshot.as_mut() {
             let duration = oneshot.duration;
@@ -162,9 +157,6 @@ impl<S: StateReqs, I: EventReqs, O: EventReqs> ComponentLifecycle for Task<S, I,
     fn on_stop(&mut self) -> Handled {
         if let Some(scheduled_oneshot) = self.scheduled_oneshot.take() {
             self.cancel_timer(scheduled_oneshot);
-        }
-        if let Some(scheduled_periodic) = self.scheduled_periodic.take() {
-            self.cancel_timer(scheduled_periodic);
         }
         Handled::Ok
     }
