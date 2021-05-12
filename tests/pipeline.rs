@@ -1,21 +1,10 @@
 #![allow(unused)]
 
-mod client;
-mod control;
-mod data;
-mod executor;
-mod pipeline;
-mod port;
-mod sink;
-mod source;
-mod stream;
-mod task;
-
-use client::*;
-use data::*;
-use executor::*;
-use pipeline::*;
-use task::*;
+use arctime::client::*;
+use arctime::data::*;
+use arctime::executor::*;
+use arctime::pipeline::*;
+use arctime::task::*;
 
 use kompact::prelude::*;
 use std::time::Duration;
